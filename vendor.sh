@@ -27,3 +27,6 @@ function vendor() {
 
 vendor "softprops" "action-gh-release" "91409e712cf565ce9eff10c87a8d1b11b81757ae" "build"
 vendor "docker" "login-action" "f3364599c6aa293cdc2b8391b1b56d0c30e45c8a" "build"
+vendor "docker" "build-push-action" "4a531fa5a603bab87dfa56578bd82b28508c9547" "build"
+vendor "docker" "setup-buildx-action" "154c24e1f33dbb5865a021c99f1318cfebf27b32" "build"
+vendor "docker" "setup-qemu-action" "6520a2d2cb6db42c90c297c8025839c98e531268" "build"

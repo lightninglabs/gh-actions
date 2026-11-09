@@ -14,8 +14,12 @@ There is a shell script (`vendor.sh`) that performs the following steps for each
 action:
  - Download source archive of specified commit from GitHub.
  - Extract source into `@<action-name>` directory.
- - Run `npm install` and `npm build` (or `npm package` for some actions).
+ - Build it. Actions with a `yarn.lock` are built in a pinned Node container
+   with `yarn install --immutable`, so dependencies are exactly the ones
+   upstream locked. Others run `npm install` and `npm run <script>`.
  - Copy all files necessary to run the action into the folder `<action-name>`.
+
+Requires Docker. `./vendor.sh <action-name>...` vendors only the named actions.
 
 To add a new action, simply add a new line to the bottom of the `vendor.sh`
 script:
@@ -25,6 +29,10 @@ vendor "<gh-org-name>" "<gh-repo-name>" "<commit-hash>" "<npm-action-name>"
 ```
 
 To update an action, simply replace the git commit hash with a new version.
+
+If upstream commits its built `dist/` (Docker's actions do), compare it with
+ours after vendoring. Identical files mean the vendored code is exactly what
+upstream released.
 
 ## How to audit an action
 

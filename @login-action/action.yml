@@ -16,12 +16,21 @@ inputs:
   password:
     description: 'Password or personal access token used to log against the Docker registry'
     required: false
+  ecr:
+    description: 'Specifies whether the given registry is ECR (auto, true or false)'
+    required: false
+  scope:
+    description: 'Scope for the authentication token'
+    required: false
   logout:
     description: 'Log out from the Docker registry at the end of a job'
     default: 'true'
     required: false
+  registry-auth:
+    description: 'Raw authentication to registries, defined as YAML objects'
+    required: false
 
 runs:
-  using: 'node12'
-  main: 'dist/index.js'
-  post: 'dist/index.js'
+  using: 'node24'
+  main: 'dist/index.cjs'
+  post: 'dist/index.cjs'

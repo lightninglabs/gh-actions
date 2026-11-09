@@ -1,15 +1,19 @@
-import * as semver from 'semver';
-import * as io from '@actions/io';
-import * as execm from './exec';
+import * as core from '@actions/core';
+import {ECR} from '@aws-sdk/client-ecr';
+import {ECRPUBLIC} from '@aws-sdk/client-ecr-public';
+import {NodeHttpHandler} from '@smithy/node-http-handler';
+import {HttpProxyAgent} from 'http-proxy-agent';
+import {HttpsProxyAgent} from 'https-proxy-agent';
 
-const ecrRegistryRegex = /^(([0-9]{12})\.dkr\.ecr\.(.+)\.amazonaws\.com(.cn)?)(\/([^:]+)(:.+)?)?$/;
+const ecrRegistryRegex = /^(([0-9]{12})\.(dkr\.ecr|dkr-ecr)\.(.+)\.(on\.aws|amazonaws\.(com(.cn)?|eu)))(\/([^:]+)(:.+)?)?$/;
+const ecrPublicRegistryRegex = /public\.ecr\.aws|ecr-public\.aws\.com/;
 
 export const isECR = (registry: string): boolean => {
   return ecrRegistryRegex.test(registry) || isPubECR(registry);
 };
 
 export const isPubECR = (registry: string): boolean => {
-  return registry === 'public.ecr.aws';
+  return ecrPublicRegistryRegex.test(registry);
 };
 
 export const getRegion = (registry: string): string => {
@@ -20,7 +24,7 @@ export const getRegion = (registry: string): string => {
   if (!matches) {
     return '';
   }
-  return matches[3];
+  return matches[4];
 };
 
 export const getAccountIDs = (registry: string): string[] => {
@@ -31,63 +35,104 @@ export const getAccountIDs = (registry: string): string[] => {
   if (!matches) {
     return [];
   }
-  let accountIDs: Array<string> = [matches[2]];
+  const accountIDs: Array<string> = [matches[2]];
   if (process.env.AWS_ACCOUNT_IDS) {
     accountIDs.push(...process.env.AWS_ACCOUNT_IDS.split(','));
   }
   return accountIDs.filter((item, index) => accountIDs.indexOf(item) === index);
 };
 
-export const getCLI = async (): Promise<string> => {
-  return io.which('aws', true);
-};
+export interface RegistryData {
+  registry: string;
+  username: string;
+  password: string;
+}
 
-export const execCLI = async (args: string[]): Promise<string> => {
-  return execm.exec(await getCLI(), args, true).then(res => {
-    if (res.stderr != '' && !res.success) {
-      throw new Error(res.stderr);
-    } else if (res.stderr != '') {
-      return res.stderr.trim();
-    } else {
-      return res.stdout.trim();
-    }
-  });
-};
+export const getRegistriesData = async (registry: string, username?: string, password?: string): Promise<RegistryData[]> => {
+  const region = getRegion(registry);
+  const accountIDs = getAccountIDs(registry);
 
-export const getCLIVersion = async (): Promise<string> => {
-  return parseCLIVersion(await execCLI(['--version']));
-};
-
-export const parseCLIVersion = async (stdout: string): Promise<string> => {
-  const matches = /aws-cli\/([0-9.]+)/.exec(stdout);
-  if (!matches) {
-    throw new Error(`Cannot parse AWS CLI version`);
+  const authTokenRequest = {};
+  if (accountIDs.length > 0) {
+    core.debug(`Requesting AWS ECR auth token for ${accountIDs.join(', ')}`);
+    authTokenRequest['registryIds'] = accountIDs;
   }
-  return semver.clean(matches[1]);
-};
 
-export const getDockerLoginCmds = async (
-  cliVersion: string,
-  registry: string,
-  region: string,
-  accountIDs: string[]
-): Promise<string[]> => {
-  let ecrCmd = (await isPubECR(registry)) ? 'ecr-public' : 'ecr';
-  if (semver.satisfies(cliVersion, '>=2.0.0') || (await isPubECR(registry))) {
-    return execCLI([ecrCmd, 'get-login-password', '--region', region]).then(pwd => {
-      return [`docker login --username AWS --password ${pwd} ${registry}`];
+  let httpProxyAgent;
+  const httpProxy = process.env.http_proxy || process.env.HTTP_PROXY || '';
+  if (httpProxy) {
+    core.debug(`Using http proxy ${httpProxy}`);
+    httpProxyAgent = new HttpProxyAgent(httpProxy);
+  }
+
+  let httpsProxyAgent;
+  const httpsProxy = process.env.https_proxy || process.env.HTTPS_PROXY || '';
+  if (httpsProxy) {
+    core.debug(`Using https proxy ${httpsProxy}`);
+    httpsProxyAgent = new HttpsProxyAgent(httpsProxy);
+  }
+
+  const credentials =
+    username && password
+      ? {
+          accessKeyId: username,
+          secretAccessKey: password
+        }
+      : undefined;
+
+  if (isPubECR(registry)) {
+    core.info(`AWS Public ECR detected with ${region} region`);
+    const ecrPublic = new ECRPUBLIC({
+      customUserAgent: 'docker-login-action',
+      credentials,
+      region: region,
+      requestHandler: new NodeHttpHandler({
+        httpAgent: httpProxyAgent,
+        httpsAgent: httpsProxyAgent
+      })
     });
+    const authTokenResponse = await ecrPublic.getAuthorizationToken(authTokenRequest);
+    if (!authTokenResponse.authorizationData || !authTokenResponse.authorizationData.authorizationToken) {
+      throw new Error('Could not retrieve an authorization token from AWS Public ECR');
+    }
+    const authToken = Buffer.from(authTokenResponse.authorizationData.authorizationToken, 'base64').toString('utf-8');
+    const creds = authToken.split(':', 2);
+    core.setSecret(creds[0]); // redacted in workflow logs
+    core.setSecret(creds[1]); // redacted in workflow logs
+    return [
+      {
+        registry: 'public.ecr.aws',
+        username: creds[0],
+        password: creds[1]
+      }
+    ];
   } else {
-    return execCLI([
-      ecrCmd,
-      'get-login',
-      '--region',
-      region,
-      '--registry-ids',
-      accountIDs.join(' '),
-      '--no-include-email'
-    ]).then(dockerLoginCmds => {
-      return dockerLoginCmds.trim().split(`\n`);
+    core.info(`AWS ECR detected with ${region} region`);
+    const ecr = new ECR({
+      customUserAgent: 'docker-login-action',
+      credentials,
+      region: region,
+      requestHandler: new NodeHttpHandler({
+        httpAgent: httpProxyAgent,
+        httpsAgent: httpsProxyAgent
+      })
     });
+    const authTokenResponse = await ecr.getAuthorizationToken(authTokenRequest);
+    if (!Array.isArray(authTokenResponse.authorizationData) || !authTokenResponse.authorizationData.length) {
+      throw new Error('Could not retrieve an authorization token from AWS ECR');
+    }
+    const regDatas: RegistryData[] = [];
+    for (const authData of authTokenResponse.authorizationData) {
+      const authToken = Buffer.from(authData.authorizationToken || '', 'base64').toString('utf-8');
+      const creds = authToken.split(':', 2);
+      core.setSecret(creds[0]); // redacted in workflow logs
+      core.setSecret(creds[1]); // redacted in workflow logs
+      regDatas.push({
+        registry: authData.proxyEndpoint || '',
+        username: creds[0],
+        password: creds[1]
+      });
+    }
+    return regDatas;
   }
 };

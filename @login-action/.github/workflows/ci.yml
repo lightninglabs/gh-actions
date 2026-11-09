@@ -1,40 +1,134 @@
 name: ci
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GHCR_TEST_IMAGE: ghcr.io/docker/login-action-test:ci-${{ github.sha }}
+
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 10 * * *' # everyday at 10am
+    - cron: '0 10 * * *'
   push:
     branches:
-      - master
+      - 'master'
+      - 'releases/v*'
 
 jobs:
-  dind:
+  stop-docker:
     runs-on: ubuntu-latest
-    env:
-      DOCKER_CONFIG: $HOME/.docker
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      -
+        name: Stop docker
+        run: |
+          sudo systemctl stop docker
       -
         name: Login to GitHub Container Registry
         uses: ./
         with:
           registry: ghcr.io
-          username: ${{ secrets.GHCR_USERNAME }}
-          password: ${{ secrets.GHCR_PAT }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+  logout:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        logout:
+          - false
+          - true
+    steps:
       -
-        name: DinD
-        uses: docker://docker
+        name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      -
+        name: Login to GitHub Container Registry
+        uses: ./
         with:
-          entrypoint: docker
-          args: pull ghcr.io/docker-ghactiontest/test
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          logout: ${{ matrix.logout }}
+
+  push-ghcr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
       -
-        name: Pull private image
+        name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      -
+        name: Login to GitHub Container Registry
+        uses: ./
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      -
+        name: Build and push test image
+        run: |
+          docker buildx build --push -t "${GHCR_TEST_IMAGE}" - <<EOF
+          FROM scratch
+          LABEL org.opencontainers.image.title="docker/login-action CI test image"
+          LABEL org.opencontainers.image.description="Empty image used by CI to verify GHCR authentication."
+          LABEL org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}"
+          EOF
+
+  dind:
+    runs-on: ubuntu-latest
+    needs:
+      - push-ghcr
+    permissions:
+      contents: read
+      packages: read
+    env:
+      DOCKER_CONFIG: $HOME/.docker
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      -
+        name: Login to GitHub Container Registry
+        uses: ./
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      -
+        name: Pull test image from Docker CLI container action
+        uses: ./.github/actions/docker-pull
+        with:
+          image: ${{ env.GHCR_TEST_IMAGE }}
+      -
+        name: Pull test image
         run: |
           docker image prune -a -f >/dev/null 2>&1
-          docker pull ghcr.io/docker-ghactiontest/test
+          docker pull "${GHCR_TEST_IMAGE}"
+
+  acr:
+    runs-on: ubuntu-latest
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      -
+        name: Login to ACR
+        uses: ./
+        with:
+          registry: officialgithubactions.azurecr.io
+          username: ${{ secrets.AZURE_CLIENT_ID }}
+          password: ${{ secrets.AZURE_CLIENT_SECRET }}
 
   dockerhub:
     runs-on: ${{ matrix.os }}
@@ -42,19 +136,62 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - ubuntu-20.04
-          - ubuntu-18.04
-          - ubuntu-16.04
+          - ubuntu-latest
+          - windows-latest
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       -
         name: Login to Docker Hub
         uses: ./
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          username: ${{ vars.DOCKERPUBLICBOT_USERNAME }}
+          password: ${{ secrets.DOCKERPUBLICBOT_READ_PAT }}
+
+  dockerhub-oidc:
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      -
+        name: Login to Docker Hub with OIDC
+        uses: ./
+        env:
+          DOCKERHUB_OIDC_CONNECTIONID: ${{ vars.DOCKERHUB_OIDC_CONNECTIONID }}
+        with:
+          username: ${{ vars.DOCKERHUB_OIDC_USERNAME }}
+
+  registry-auth-oidc:
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      -
+        name: Login to registries
+        uses: ./
+        env:
+          DOCKERHUB_OIDC_CONNECTIONID: ${{ vars.DOCKERHUB_OIDC_CONNECTIONID }}
+        with:
+          registry-auth: |
+            - username: ${{ vars.DOCKERHUB_OIDC_USERNAME }}
+            - registry: ghcr.io
+              username: ${{ github.actor }}
+              password: ${{ secrets.GITHUB_TOKEN }}
 
   ecr:
     runs-on: ${{ matrix.os }}
@@ -62,18 +199,17 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - ubuntu-20.04
-          - ubuntu-18.04
-          - ubuntu-16.04
+          - ubuntu-latest
+          - windows-latest
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       -
         name: Login to ECR
         uses: ./
         with:
-          registry: ${{ secrets.AWS_ACCOUNT_NUMBER }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+          registry: 175142243308.dkr.ecr.us-east-1.amazonaws.com
           username: ${{ secrets.AWS_ACCESS_KEY_ID }}
           password: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
@@ -83,25 +219,51 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - ubuntu-20.04
-          - ubuntu-18.04
-          - ubuntu-16.04
+          - ubuntu-latest
+          - windows-latest
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       -
         name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v1
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: us-east-1
       -
         name: Login to ECR
         uses: ./
         with:
-          registry: ${{ secrets.AWS_ACCOUNT_NUMBER }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+          registry: 175142243308.dkr.ecr.us-east-1.amazonaws.com
+
+  ecr-oidc:
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      -
+        name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::175142243308:role/official_gha_cicd_login_action
+          aws-region: us-east-1
+      -
+        name: Login to ECR
+        uses: ./
+        with:
+          registry: 175142243308.dkr.ecr.us-east-1.amazonaws.com
 
   ecr-public:
     runs-on: ${{ matrix.os }}
@@ -109,55 +271,109 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - ubuntu-20.04
-          - ubuntu-18.04
-          - ubuntu-16.04
+          - ubuntu-latest
+          - windows-latest
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       -
         name: Login to Public ECR
+        continue-on-error: ${{ matrix.os == 'windows-latest' }}
         uses: ./
         with:
           registry: public.ecr.aws
           username: ${{ secrets.AWS_ACCESS_KEY_ID }}
           password: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        env:
+          AWS_REGION: us-east-1
 
-  github-package:
-    runs-on: ubuntu-latest
+  ecr-public-aws-creds:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       -
-        name: Login to GitHub Package Registry
+        name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+      -
+        name: Login to Public ECR
+        continue-on-error: ${{ matrix.os == 'windows-latest' }}
         uses: ./
         with:
-          registry: docker.pkg.github.com
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          registry: public.ecr.aws
 
-  github-container:
-    runs-on: ubuntu-latest
+  ecr-public-oidc:
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      -
+        name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::175142243308:role/official_gha_cicd_login_action
+          aws-region: us-east-1
+      -
+        name: Login to Public ECR
+        continue-on-error: ${{ matrix.os == 'windows-latest' }}
+        uses: ./
+        with:
+          registry: public.ecr.aws
+
+  ghcr:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       -
         name: Login to GitHub Container Registry
         uses: ./
         with:
           registry: ghcr.io
-          username: ${{ secrets.GHCR_USERNAME }}
-          password: ${{ secrets.GHCR_PAT }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
   gitlab:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       -
         name: Login to GitLab
         uses: ./
@@ -166,30 +382,234 @@ jobs:
           username: ${{ secrets.GITLAB_USERNAME }}
           password: ${{ secrets.GITLAB_TOKEN }}
 
-#  google-artifact:
-#    runs-on: ubuntu-latest
-#    steps:
-#      -
-#        name: Checkout
-#        uses: actions/checkout@v2
-#      -
-#        name: Login to Google Artifact Registry
-#        uses: ./
-#        with:
-#          registry: ${{ secrets.GAR_LOCATION }}-docker.pkg.dev
-#          username: _json_key
-#          password: ${{ secrets.GAR_JSON_KEY }}
-#
-#  google-container:
-#    runs-on: ubuntu-latest
-#    steps:
-#      -
-#        name: Checkout
-#        uses: actions/checkout@v2
-#      -
-#        name: Login to Google Container Registry
-#        uses: ./
-#        with:
-#          registry: gcr.io
-#          username: _json_key
-#          password: ${{ secrets.GCR_JSON_KEY }}
+  google-artifact:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      -
+        name: Login to Google Artifact Registry
+        uses: ./
+        with:
+          registry: us-east4-docker.pkg.dev
+          username: _json_key
+          password: ${{ secrets.GAR_JSON_KEY }}
+
+  google-container:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      -
+        name: Login to Google Container Registry
+        uses: ./
+        with:
+          registry: gcr.io
+          username: _json_key
+          password: ${{ secrets.GCR_JSON_KEY }}
+
+  registry-auth:
+    runs-on: ubuntu-latest
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      -
+        name: Login to registries
+        uses: ./
+        with:
+          registry-auth: |
+            - username: ${{ vars.DOCKERPUBLICBOT_USERNAME }}
+              password: ${{ secrets.DOCKERPUBLICBOT_READ_PAT }}
+            - registry: ghcr.io
+              username: ${{ github.actor }}
+              password: ${{ secrets.GITHUB_TOKEN }}
+            - registry: public.ecr.aws
+              username: ${{ secrets.AWS_ACCESS_KEY_ID }}
+              password: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+            - registry: registry.gitlab.com
+              username: ${{ secrets.GITLAB_USERNAME }}
+              password: ${{ secrets.GITLAB_TOKEN }}
+
+  registry-auth-dup:
+    runs-on: ubuntu-latest
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      -
+        name: Login to registries
+        uses: ./
+        with:
+          registry-auth: |
+            - registry: ghcr.io
+              username: ${{ github.actor }}
+              password: ${{ secrets.GITHUB_TOKEN }}
+            - registry: public.ecr.aws
+              username: ${{ secrets.AWS_ACCESS_KEY_ID }}
+              password: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+            - registry: ghcr.io
+              username: ${{ github.actor }}
+              password: ${{ secrets.GITHUB_TOKEN }}
+
+  registry-auth-exclusive:
+    runs-on: ubuntu-latest
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      -
+        name: Login to registries
+        id: login
+        continue-on-error: true
+        uses: ./
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          registry-auth: |
+            - username: ${{ vars.DOCKERPUBLICBOT_USERNAME }}
+              password: ${{ secrets.DOCKERPUBLICBOT_READ_PAT }}
+      -
+        name: Check
+        run: |
+          if [ "${{ steps.login.outcome }}" != "failure" ] || [ "${{ steps.login.conclusion }}" != "success" ]; then
+            echo "::error::Should have failed"
+            exit 1
+          fi
+
+  scope-dockerhub:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      -
+        name: Login to Docker Hub
+        uses: ./
+        with:
+          username: ${{ vars.DOCKERPUBLICBOT_USERNAME }}
+          password: ${{ secrets.DOCKERPUBLICBOT_READ_PAT }}
+          scope: '@push'
+      -
+        name: Print config.json files
+        shell: bash
+        run: |
+          shopt -s globstar nullglob
+          for file in ~/.docker/**/config.json; do
+            echo "## ${file}"
+            jq '(.auths[]?.auth) |= "REDACTED"' "$file"
+            echo ""
+          done
+
+  scope-dockerhub-repo:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      -
+        name: Login to Docker Hub
+        uses: ./
+        with:
+          username: ${{ vars.DOCKERPUBLICBOT_USERNAME }}
+          password: ${{ secrets.DOCKERPUBLICBOT_READ_PAT }}
+          scope: 'docker/buildx-bin@push'
+      -
+        name: Print config.json files
+        shell: bash
+        run: |
+          shopt -s globstar nullglob
+          for file in ~/.docker/**/config.json; do
+            echo "## ${file}"
+            jq '(.auths[]?.auth) |= "REDACTED"' "$file"
+            echo ""
+          done
+
+  scope-ghcr:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      -
+        name: Login to GitHub Container Registry
+        uses: ./
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          scope: '@push'
+      -
+        name: Print config.json files
+        shell: bash
+        run: |
+          shopt -s globstar nullglob
+          for file in ~/.docker/**/config.json; do
+            echo "## ${file}"
+            jq '(.auths[]?.auth) |= "REDACTED"' "$file"
+            echo ""
+          done
+
+  scope-ghcr-repo:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      -
+        name: Login to GitHub Container Registry
+        uses: ./
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          scope: 'docker/login-action@push'
+      -
+        name: Print config.json files
+        shell: bash
+        run: |
+          shopt -s globstar nullglob
+          for file in ~/.docker/**/config.json; do
+            echo "## ${file}"
+            jq '(.auths[]?.auth) |= "REDACTED"' "$file"
+            echo ""
+          done

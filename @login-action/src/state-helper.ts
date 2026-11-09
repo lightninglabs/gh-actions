@@ -1,17 +1,17 @@
 import * as core from '@actions/core';
 
-export const IsPost = !!process.env['STATE_isPost'];
-export const registry = process.env['STATE_registry'] || '';
+export const registries = process.env['STATE_registries'] ? (JSON.parse(process.env['STATE_registries']) as Array<RegistryState>) : [];
 export const logout = /true/i.test(process.env['STATE_logout'] || '');
 
-export function setRegistry(registry: string) {
-  core.saveState('registry', registry);
+export interface RegistryState {
+  registry: string;
+  configDir: string;
 }
 
-export function setLogout(logout: string) {
+export function setRegistries(registries: Array<RegistryState>) {
+  core.saveState('registries', JSON.stringify(registries));
+}
+
+export function setLogout(logout: boolean) {
   core.saveState('logout', logout);
-}
-
-if (!IsPost) {
-  core.saveState('isPost', 'true');
 }

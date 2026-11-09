@@ -1,112 +1,7 @@
 # Troubleshooting
 
-* [`auto-push is currently not implemented for docker driver`](#auto-push-is-currently-not-implemented-for-docker-driver)
 * [Cannot push to a registry](#cannot-push-to-a-registry)
-
-## `auto-push is currently not implemented for docker driver`
-
-If you're using the default builder (which uses the docker driver) without using our `setup-buildx-action`, you may
-encounter this error message if you try to push your image:
-
-```
-Run docker/build-push-action@v2
-📣 Buildx version: 0.4.2
-🏃 Starting build...
-/usr/bin/docker buildx build --tag localhost:5000/name/app:latest --iidfile /tmp/docker-build-push-eYl8PB/iidfile --file ./test/Dockerfile --push ./test
-auto-push is currently not implemented for docker driver
-Error: buildx call failed with: auto-push is currently not implemented for docker driver
-```
-
-While waiting for an implementation to be done on buildx/buildkit, you have the following possibilities
-to solve this atm:
-
-### With `docker-container` driver and `setup-buildx`
-
-> Recommended solution
-
-```yaml
-jobs:
-  build:
-    -
-      name: Checkout
-      uses: actions/checkout@v2
-    -
-      name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v1
-    -
-      name: Login
-      uses: docker/login-action@v1
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ env.USER }}
-        password: ${{ secrets.PASSWORD }}
-    -
-      name: Build and push
-      uses: docker/build-push-action@v2
-      with:
-        context: .
-        tags: ${{ env.REGISTRY }}/myapp:latest
-        push: true
-```
-
-### With `docker` driver
-
-```yaml
-jobs:
-  build:
-    -
-      name: Checkout
-      uses: actions/checkout@v2
-    -
-      name: Login
-      uses: docker/login-action@v1
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ env.USER }}
-        password: ${{ secrets.PASSWORD }}
-    -
-      name: Build
-      uses: docker/build-push-action@v2
-      with:
-        context: .
-        tags: ${{ env.REGISTRY }}/myapp:latest
-        load: true
-    -
-      name: Push
-      run: docker push ${{ env.REGISTRY }}/myapp:latest
-```
-
-### With `docker` driver and `setup-buildx`
-
-```yaml
-jobs:
-  build:
-    -
-      name: Checkout
-      uses: actions/checkout@v2
-    -
-      name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v1
-      with:
-        driver: docker
-    -
-      name: Login
-      uses: docker/login-action@v1
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ env.USER }}
-        password: ${{ secrets.PASSWORD }}
-    -
-      name: Build
-      uses: docker/build-push-action@v2
-      with:
-        context: .
-        tags: ${{ env.REGISTRY }}/myapp:latest
-        load: true
-    -
-      name: Push
-      run: docker push ${{ env.REGISTRY }}/myapp:latest
-```
+* [`repository name must be lowercase`](#repository-name-must-be-lowercase)
 
 ## Cannot push to a registry
 
@@ -118,63 +13,71 @@ While pushing to a registry, you may encounter these kinds of issues:
 * `failed commit on ref "manifest-sha256:...": unexpected status: 401 Unauthorized`
 * `unexpected response: 401 Unauthorized`
 
-These issues are not directly related to this action but are rather linked to [buildx](https://github.com/docker/buildx),
-[buildkit](https://github.com/moby/buildkit), [containerd](https://github.com/containerd/containerd) or the registry
-on which you're pushing your image. The quality of error message depends on the registry and are usually not very informative.
+These issues are not directly related to this action but are rather linked to
+[Buildx](https://github.com/docker/buildx), [BuildKit](https://github.com/moby/buildkit),
+[containerd](https://github.com/containerd/containerd) or the registry on which
+you're pushing your image. The quality of error message depends on the registry
+and are usually not very informative.
 
-To help you solve this, you should first enable debugging in the
-[setup-buildx action step](https://github.com/docker/setup-buildx-action):
+To help you solve this, you have to [enable debugging in the setup-buildx](https://github.com/docker/setup-buildx-action#buildkit-container-logs)
+action step and attach BuildKit container logs to your issue.
 
-```yaml
-  -
-    name: Set up Docker Buildx
-    uses: docker/setup-buildx-action@v1
-    with:
-      buildkitd-flags: --debug
+## `repository name must be lowercase`
+
+You may encounter this issue if you're using `github.repository` as a repo slug
+in your tag:
+
+```
+#6 exporting to image
+#6 exporting layers
+#6 exporting layers 1.2s done
+#6 exporting manifest sha256:b47f7dfb97b89ccd5de553af3c8cd94c4795884cbe5693e93946b1d95a7b1d12 0.0s done
+#6 exporting config sha256:995e93fab8196893192f08a38deea6769dc4d98f86cf705eccc24ec96a3e271c 0.0s done
+#6 ERROR: invalid reference format: repository name must be lowercase
+------
+ > exporting to image:
+------
+error: failed to solve: invalid reference format: repository name must be lowercase
 ```
 
-Next you can test pushing with [containerd action](https://github.com/crazy-max/ghaction-setup-containerd) using the
-following workflow. If it works then open an issue on [buildkit](https://github.com/moby/buildkit) repository.
+or a cache reference:
+
+```
+#10 importing cache manifest from ghcr.io/My-Org/repo:main
+#10 ERROR: invalid reference format: repository name must be lowercase
+```
+
+To fix this issue you can use our [metadata action](https://github.com/docker/metadata-action)
+to generate sanitized tags:
 
 ```yaml
-name: containerd
+- name: Docker meta
+  id: meta
+  uses: docker/metadata-action@v6
+  with:
+    images: ghcr.io/${{ github.repository }}
+    tags: latest
 
-on:
-  push:
+- name: Build and push
+  uses: docker/build-push-action@v7
+  with:
+    push: true
+    tags: ${{ steps.meta.outputs.tags }}
+```
 
-jobs:
-  containerd:
-    runs-on: ubuntu-latest
-    steps:
-      -
-        name: Checkout
-        uses: actions/checkout@v2
-      -
-        name: Set up QEMU
-        uses: docker/setup-qemu-action@v1
-      -
-        name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v1
-        with:
-          buildkitd-flags: --debug
-      -
-        name: Set up containerd
-        uses: crazy-max/ghaction-setup-containerd@v1
-      -
-        name: Build Docker image
-        uses: docker/build-push-action@v2
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/386,linux/amd64,linux/arm/v6,linux/arm/v7,linux/arm64,linux/ppc64le,linux/s390x
-          tags: docker.io/user/app:latest
-          outputs: type=oci,dest=/tmp/image.tar
-      -
-        name: Import image in containerd
-        run: |
-          sudo ctr i import --base-name docker.io/user/app --digests --all-platforms /tmp/image.tar
-      -
-        name: Push image with containerd
-        run: |
-          sudo ctr --debug i push --user "${{ secrets.DOCKER_USERNAME }}:${{ secrets.DOCKER_PASSWORD }}" docker.io/user/app:latest
+Or a dedicated step to sanitize the slug:
+
+```yaml
+- name: Sanitize repo slug
+  uses: actions/github-script@v8
+  id: repo_slug
+  with:
+    result-encoding: string
+    script: return 'ghcr.io/${{ github.repository }}'.toLowerCase()
+
+- name: Build and push
+  uses: docker/build-push-action@v7
+  with:
+    push: true
+    tags: ${{ steps.repo_slug.outputs.result }}:latest
 ```

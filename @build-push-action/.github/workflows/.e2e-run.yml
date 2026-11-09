@@ -1,0 +1,151 @@
+# reusable workflow
+name: .e2e-run
+
+on:
+  workflow_call:
+    inputs:
+      id:
+        required: false
+        type: string
+      type:
+        required: true
+        type: string
+      provider:
+        required: true
+        type: string
+      name:
+        required: true
+        type: string
+      registry:
+        required: false
+        type: string
+      slug:
+        required: false
+        type: string
+    secrets:
+      registry_username:
+        required: false
+      registry_password:
+        required: false
+
+env:
+  HARBOR_VERSION: v2.13.2
+  NEXUS_VERSION: 3.47.1
+  DISTRIBUTION_VERSION: 3.0.0
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          -
+            buildx_version: edge
+            buildkit_image: moby/buildkit:latest
+          -
+            buildx_version: latest
+            buildkit_image: moby/buildkit:buildx-stable-1
+          -
+            buildx_version: https://github.com/docker/buildx.git#master
+            buildkit_image: moby/buildkit:master
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      -
+        name: Set up env
+        if: inputs.type == 'local'
+        env:
+          ID: ${{ inputs.id }}
+        run: |
+          cat ./.github/e2e/${ID}/env >> $GITHUB_ENV
+      -
+        # FIXME: Remove this once GitLab Registry accepts OCI artifact attestations
+        # whose subject points to a manifest pushed in the same build.
+        # https://github.com/docker/buildx/pull/3991
+        name: Set up GitLab env
+        if: inputs.provider == 'gitlab'
+        run: |
+          echo "BUILDX_NO_DEFAULT_OCI_ARTIFACT=true" >> "$GITHUB_ENV"
+      -
+        name: Set up BuildKit config
+        env:
+          TYPE: ${{ inputs.type }}
+        run: |
+          touch /tmp/buildkitd.toml
+          if [ "${TYPE}" = "local" ]; then
+            echo -e "[registry.\"${{ env.REGISTRY_FQDN }}\"]\nhttp = true\ninsecure = true" > /tmp/buildkitd.toml
+          fi
+      -
+        name: Set up Docker daemon
+        if: inputs.type == 'local'
+        run: |
+          if [ ! -e /etc/docker/daemon.json ]; then
+            echo '{}' | sudo tee /etc/docker/daemon.json >/dev/null
+          fi
+          DOCKERD_CONFIG=$(jq '.+{"insecure-registries":["http://${{ env.REGISTRY_FQDN }}"]}' /etc/docker/daemon.json)
+          sudo tee /etc/docker/daemon.json <<<"$DOCKERD_CONFIG" >/dev/null
+          cat /etc/docker/daemon.json
+          sudo service docker restart
+      -
+        name: Install ${{ inputs.name }}
+        if: inputs.type == 'local'
+        env:
+          ID: ${{ inputs.id }}
+        run: |
+          sudo -E bash ./.github/e2e/${ID}/install.sh
+          sudo chown $(id -u):$(id -g) -R ~/.docker
+      -
+        name: Docker meta
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.REGISTRY_SLUG || inputs.slug }}
+          tags: |
+            type=ref,event=branch,enable=${{ matrix.buildx_version == 'latest' && matrix.buildkit_image == 'moby/buildkit:buildx-stable-1' }}
+            type=ref,event=tag,enable=${{ matrix.buildx_version == 'latest' && matrix.buildkit_image == 'moby/buildkit:buildx-stable-1' }}
+            type=raw,gh-runid-${{ github.run_id }}
+      -
+        name: Set up QEMU
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+      -
+        name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        with:
+          version: ${{ matrix.buildx_version }}
+          buildkitd-config: /tmp/buildkitd.toml
+          buildkitd-flags: --debug --allow-insecure-entitlement security.insecure --allow-insecure-entitlement network.host
+          driver-opts: |
+            image=${{ matrix.buildkit_image }}
+            network=host
+      -
+        name: Configure AWS credentials
+        if: inputs.provider == 'aws'
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: arn:aws:iam::175142243308:role/official_gha_cicd
+          aws-region: us-east-1
+      -
+        name: Login to Registry
+        if: github.event_name != 'pull_request' && (inputs.type == 'remote' || inputs.provider == 'aws' || env.REGISTRY_USER != '')
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        env:
+          DOCKERHUB_OIDC_CONNECTIONID: ${{ inputs.provider == 'dockerhub' && vars.DOCKERHUB_OIDC_CONNECTIONID || '' }}
+        with:
+          registry: ${{ env.REGISTRY_FQDN || inputs.registry }}
+          username: ${{ env.REGISTRY_USER || secrets.registry_username || (inputs.registry == 'ghcr.io' && github.actor) || '' }}
+          password: ${{ env.REGISTRY_PASSWORD || secrets.registry_password || (inputs.registry == 'ghcr.io' && secrets.GITHUB_TOKEN) || '' }}
+          scope: ${{ inputs.type == 'remote' && inputs.registry == '' && '@push' || '' }}
+      -
+        name: Build and push
+        uses: ./
+        with:
+          context: ./test
+          file: ./test/multi.Dockerfile
+          platforms: linux/386,linux/amd64,linux/arm/v6,linux/arm/v7,linux/arm64,linux/ppc64le,linux/s390x
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY_SLUG || inputs.slug }}:master
+          cache-to: type=inline

@@ -1,158 +1,233 @@
-import csvparse from 'csv-parse/lib/sync';
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
-import * as semver from 'semver';
-import * as tmp from 'tmp';
-
 import * as core from '@actions/core';
-import * as github from '@actions/github';
+import * as handlebars from 'handlebars';
 
-import * as buildx from './buildx';
+import {Build} from '@docker/actions-toolkit/lib/buildx/build.js';
+import {GitHub} from '@docker/actions-toolkit/lib/github/github.js';
+import {Toolkit} from '@docker/actions-toolkit/lib/toolkit.js';
+import {Util} from '@docker/actions-toolkit/lib/util.js';
 
-let _defaultContext, _tmpDir: string;
+let defaultContextPromise: Promise<string> | undefined;
+
+async function getDefaultContext(): Promise<string> {
+  defaultContextPromise ??= new Build().gitContext();
+  return await defaultContextPromise;
+}
 
 export interface Inputs {
+  'add-hosts': string[];
+  allow: string[];
+  annotations: string[];
+  attests: string[];
+  'build-args': string[];
+  'build-contexts': string[];
+  builder: string;
+  'cache-from': string[];
+  'cache-to': string[];
+  call: string;
+  'cgroup-parent': string;
   context: string;
   file: string;
-  buildArgs: string[];
   labels: string[];
-  tags: string[];
-  pull: boolean;
-  target: string;
-  allow: string[];
-  noCache: boolean;
-  builder: string;
-  platforms: string[];
   load: boolean;
-  push: boolean;
+  network: string;
+  'no-cache': boolean;
+  'no-cache-filters': string[];
   outputs: string[];
-  cacheFrom: string[];
-  cacheTo: string[];
+  platforms: string[];
+  provenance: string;
+  pull: boolean;
+  push: boolean;
+  sbom: string;
   secrets: string[];
-  githubToken: string;
+  'secret-envs': string[];
+  'secret-files': string[];
+  'shm-size': string;
   ssh: string[];
+  tags: string[];
+  target: string;
+  ulimit: string[];
+  'github-token': string;
 }
 
-export function defaultContext(): string {
-  if (!_defaultContext) {
-    _defaultContext = `https://github.com/${github.context.repo.owner}/${
-      github.context.repo.repo
-    }.git#${github.context?.ref?.replace(/^refs\//, '')}`;
-  }
-  return _defaultContext;
-}
-
-export function tmpDir(): string {
-  if (!_tmpDir) {
-    _tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'docker-build-push-')).split(path.sep).join(path.posix.sep);
-  }
-  return _tmpDir;
-}
-
-export function tmpNameSync(options?: tmp.TmpNameOptions): string {
-  return tmp.tmpNameSync(options);
-}
-
-export async function getInputs(defaultContext: string): Promise<Inputs> {
+export async function getInputs(): Promise<Inputs> {
+  const defaultContext = await getDefaultContext();
   return {
-    context: core.getInput('context') || defaultContext,
-    file: core.getInput('file'),
-    buildArgs: await getInputList('build-args', true),
-    labels: await getInputList('labels', true),
-    tags: await getInputList('tags'),
-    pull: /true/i.test(core.getInput('pull')),
-    target: core.getInput('target'),
-    allow: await getInputList('allow'),
-    noCache: /true/i.test(core.getInput('no-cache')),
+    'add-hosts': Util.getInputList('add-hosts'),
+    allow: Util.getInputList('allow'),
+    annotations: Util.getInputList('annotations', {ignoreComma: true}),
+    attests: Util.getInputList('attests', {ignoreComma: true}),
+    'build-args': Util.getInputList('build-args', {ignoreComma: true}),
+    'build-contexts': Util.getInputList('build-contexts', {ignoreComma: true}),
     builder: core.getInput('builder'),
-    platforms: await getInputList('platforms'),
-    load: /true/i.test(core.getInput('load')),
-    push: /true/i.test(core.getInput('push')),
-    outputs: await getInputList('outputs', true),
-    cacheFrom: await getInputList('cache-from', true),
-    cacheTo: await getInputList('cache-to', true),
-    secrets: await getInputList('secrets', true),
-    githubToken: core.getInput('github-token'),
-    ssh: await getInputList('ssh')
+    'cache-from': Util.getInputList('cache-from', {ignoreComma: true}),
+    'cache-to': Util.getInputList('cache-to', {ignoreComma: true}),
+    call: core.getInput('call'),
+    'cgroup-parent': core.getInput('cgroup-parent'),
+    context: handlebars.compile(core.getInput('context'))({defaultContext}) || defaultContext,
+    file: core.getInput('file'),
+    labels: Util.getInputList('labels', {ignoreComma: true}),
+    load: core.getBooleanInput('load'),
+    network: core.getInput('network'),
+    'no-cache': core.getBooleanInput('no-cache'),
+    'no-cache-filters': Util.getInputList('no-cache-filters'),
+    outputs: Util.getInputList('outputs', {ignoreComma: true, quote: false}),
+    platforms: Util.getInputList('platforms'),
+    provenance: Build.getProvenanceInput('provenance'),
+    pull: core.getBooleanInput('pull'),
+    push: core.getBooleanInput('push'),
+    sbom: core.getInput('sbom'),
+    secrets: Util.getInputList('secrets', {ignoreComma: true, trimWhitespace: false}),
+    'secret-envs': Util.getInputList('secret-envs'),
+    'secret-files': Util.getInputList('secret-files', {ignoreComma: true}),
+    'shm-size': core.getInput('shm-size'),
+    ssh: Util.getInputList('ssh'),
+    tags: Util.getInputList('tags'),
+    target: core.getInput('target'),
+    ulimit: Util.getInputList('ulimit', {ignoreComma: true}),
+    'github-token': core.getInput('github-token')
   };
 }
 
-export async function getArgs(inputs: Inputs, defaultContext: string, buildxVersion: string): Promise<Array<string>> {
-  let args: Array<string> = ['buildx'];
-  args.push.apply(args, await getBuildArgs(inputs, defaultContext, buildxVersion));
-  args.push.apply(args, await getCommonArgs(inputs));
-  args.push(inputs.context);
-  return args;
+export async function getArgs(inputs: Inputs, toolkit: Toolkit): Promise<Array<string>> {
+  // prettier-ignore
+  return [
+    ...await getBuildArgs(inputs, inputs.context, toolkit),
+    ...await getCommonArgs(inputs, toolkit),
+    inputs.context
+  ];
 }
 
-async function getBuildArgs(inputs: Inputs, defaultContext: string, buildxVersion: string): Promise<Array<string>> {
-  let args: Array<string> = ['build'];
-  await asyncForEach(inputs.buildArgs, async buildArg => {
+async function getBuildArgs(inputs: Inputs, context: string, toolkit: Toolkit): Promise<Array<string>> {
+  const defaultContext = await getDefaultContext();
+
+  const args: Array<string> = ['build'];
+  await Util.asyncForEach(inputs['add-hosts'], async addHost => {
+    args.push('--add-host', addHost);
+  });
+  await Util.asyncForEach(inputs.allow, async allow => {
+    args.push('--allow', allow);
+  });
+  if (await toolkit.buildx.versionSatisfies('>=0.12.0')) {
+    await Util.asyncForEach(inputs.annotations, async annotation => {
+      args.push('--annotation', annotation);
+    });
+  } else if (inputs.annotations.length > 0) {
+    core.warning("Annotations are only supported by buildx >= 0.12.0; the input 'annotations' is ignored.");
+  }
+  await Util.asyncForEach(inputs['build-args'], async buildArg => {
     args.push('--build-arg', buildArg);
   });
-  await asyncForEach(inputs.labels, async label => {
+  if (await toolkit.buildx.versionSatisfies('>=0.8.0')) {
+    await Util.asyncForEach(inputs['build-contexts'], async buildContext => {
+      args.push(
+        '--build-context',
+        handlebars.compile(buildContext)({
+          defaultContext: defaultContext
+        })
+      );
+    });
+  } else if (inputs['build-contexts'].length > 0) {
+    core.warning("Build contexts are only supported by buildx >= 0.8.0; the input 'build-contexts' is ignored.");
+  }
+  await Util.asyncForEach(inputs['cache-from'], async cacheFrom => {
+    args.push('--cache-from', cacheFrom);
+  });
+  await Util.asyncForEach(inputs['cache-to'], async cacheTo => {
+    args.push('--cache-to', cacheTo);
+  });
+  if (inputs.call) {
+    if (!(await toolkit.buildx.versionSatisfies('>=0.15.0'))) {
+      throw new Error(`Buildx >= 0.15.0 is required to use the call flag.`);
+    }
+    args.push('--call', inputs.call);
+  }
+  if (inputs['cgroup-parent']) {
+    args.push('--cgroup-parent', inputs['cgroup-parent']);
+  }
+  await Util.asyncForEach(inputs['secret-envs'], async secretEnv => {
+    try {
+      args.push('--secret', Build.resolveSecretEnv(secretEnv));
+    } catch (err) {
+      core.warning(err.message);
+    }
+  });
+  if (inputs.file) {
+    args.push('--file', inputs.file);
+  }
+  if (!Build.hasLocalExporter(inputs.outputs) && !Build.hasTarExporter(inputs.outputs) && (inputs.platforms.length == 0 || (await toolkit.buildx.versionSatisfies('>=0.4.2')))) {
+    args.push('--iidfile', toolkit.buildxBuild.getImageIDFilePath());
+  }
+  await Util.asyncForEach(inputs.labels, async label => {
     args.push('--label', label);
   });
-  await asyncForEach(inputs.tags, async tag => {
+  await Util.asyncForEach(inputs['no-cache-filters'], async noCacheFilter => {
+    args.push('--no-cache-filter', noCacheFilter);
+  });
+  await Util.asyncForEach(inputs.outputs, async output => {
+    args.push('--output', output);
+  });
+  if (inputs.platforms.length > 0) {
+    args.push('--platform', inputs.platforms.join(','));
+  }
+  if (await toolkit.buildx.versionSatisfies('>=0.10.0')) {
+    args.push(...(await getAttestArgs(inputs, toolkit)));
+  } else {
+    core.warning("Attestations are only supported by buildx >= 0.10.0; the inputs 'attests', 'provenance' and 'sbom' are ignored.");
+  }
+  await Util.asyncForEach(inputs.secrets, async secret => {
+    try {
+      args.push('--secret', Build.resolveSecretString(secret));
+    } catch (err) {
+      core.warning(err.message);
+    }
+  });
+  await Util.asyncForEach(inputs['secret-files'], async secretFile => {
+    try {
+      args.push('--secret', Build.resolveSecretFile(secretFile));
+    } catch (err) {
+      core.warning(err.message);
+    }
+  });
+  if (inputs['github-token'] && !Build.hasGitAuthTokenSecret(inputs.secrets) && context.startsWith(defaultContext)) {
+    args.push('--secret', Build.resolveSecretString(`GIT_AUTH_TOKEN.${new URL(GitHub.serverURL).host.trimEnd()}=${inputs['github-token']}`));
+  }
+  if (inputs['shm-size']) {
+    args.push('--shm-size', inputs['shm-size']);
+  }
+  await Util.asyncForEach(inputs.ssh, async ssh => {
+    args.push('--ssh', ssh);
+  });
+  await Util.asyncForEach(inputs.tags, async tag => {
     args.push('--tag', tag);
   });
   if (inputs.target) {
     args.push('--target', inputs.target);
   }
-  if (inputs.allow.length > 0) {
-    args.push('--allow', inputs.allow.join(','));
-  }
-  if (inputs.platforms.length > 0) {
-    args.push('--platform', inputs.platforms.join(','));
-  }
-  await asyncForEach(inputs.outputs, async output => {
-    args.push('--output', output);
+  await Util.asyncForEach(inputs.ulimit, async ulimit => {
+    args.push('--ulimit', ulimit);
   });
-  if (
-    !buildx.isLocalOrTarExporter(inputs.outputs) &&
-    (inputs.platforms.length == 0 || semver.satisfies(buildxVersion, '>=0.4.2'))
-  ) {
-    args.push('--iidfile', await buildx.getImageIDFile());
-  }
-  await asyncForEach(inputs.cacheFrom, async cacheFrom => {
-    args.push('--cache-from', cacheFrom);
-  });
-  await asyncForEach(inputs.cacheTo, async cacheTo => {
-    args.push('--cache-to', cacheTo);
-  });
-  await asyncForEach(inputs.secrets, async secret => {
-    try {
-      args.push('--secret', await buildx.getSecret(secret));
-    } catch (err) {
-      core.warning(err.message);
-    }
-  });
-  if (inputs.githubToken && !buildx.hasGitAuthToken(inputs.secrets) && inputs.context == defaultContext) {
-    args.push('--secret', await buildx.getSecret(`GIT_AUTH_TOKEN=${inputs.githubToken}`));
-  }
-  await asyncForEach(inputs.ssh, async ssh => {
-    args.push('--ssh', ssh);
-  });
-  if (inputs.file) {
-    args.push('--file', inputs.file);
-  }
   return args;
 }
 
-async function getCommonArgs(inputs: Inputs): Promise<Array<string>> {
-  let args: Array<string> = [];
-  if (inputs.noCache) {
-    args.push('--no-cache');
-  }
+async function getCommonArgs(inputs: Inputs, toolkit: Toolkit): Promise<Array<string>> {
+  const args: Array<string> = [];
   if (inputs.builder) {
     args.push('--builder', inputs.builder);
   }
-  if (inputs.pull) {
-    args.push('--pull');
-  }
   if (inputs.load) {
     args.push('--load');
+  }
+  if (await toolkit.buildx.versionSatisfies('>=0.6.0')) {
+    args.push('--metadata-file', toolkit.buildxBuild.getMetadataFilePath());
+  }
+  if (inputs.network) {
+    args.push('--network', inputs.network);
+  }
+  if (inputs['no-cache']) {
+    args.push('--no-cache');
+  }
+  if (inputs.pull) {
+    args.push('--pull');
   }
   if (inputs.push) {
     args.push('--push');
@@ -160,34 +235,58 @@ async function getCommonArgs(inputs: Inputs): Promise<Array<string>> {
   return args;
 }
 
-export async function getInputList(name: string, ignoreComma?: boolean): Promise<string[]> {
-  let res: Array<string> = [];
+async function getAttestArgs(inputs: Inputs, toolkit: Toolkit): Promise<Array<string>> {
+  const args: Array<string> = [];
 
-  const items = core.getInput(name);
-  if (items == '') {
-    return res;
-  }
-
-  for (let output of (await csvparse(items, {
-    columns: false,
-    relaxColumnCount: true,
-    skipLinesWithEmptyValues: true
-  })) as Array<string[]>) {
-    if (output.length == 1) {
-      res.push(output[0]);
-      continue;
-    } else if (!ignoreComma) {
-      res.push(...output);
-      continue;
+  // check if provenance attestation is set in attests input
+  let hasAttestProvenance = false;
+  await Util.asyncForEach(inputs.attests, async (attest: string) => {
+    if (Build.hasAttestationType('provenance', attest)) {
+      hasAttestProvenance = true;
     }
-    res.push(output.join(','));
+  });
+
+  let provenanceSet = false;
+  let sbomSet = false;
+  if (inputs.provenance) {
+    args.push('--attest', Build.resolveAttestationAttrs(`type=provenance,${inputs.provenance}`));
+    provenanceSet = true;
+  } else if (!hasAttestProvenance && !noDefaultAttestations() && (await toolkit.buildkit.versionSatisfies(inputs.builder, '>=0.11.0')) && !Build.hasDockerExporter(inputs.outputs, inputs.load)) {
+    // if provenance not specified in provenance or attests inputs and BuildKit
+    // version compatible for attestation, set default provenance. Also needs
+    // to make sure user doesn't want to explicitly load the image to docker.
+    if (GitHub.context.payload.repository?.private ?? false) {
+      // if this is a private repository, we set the default provenance
+      // attributes being set in buildx: https://github.com/docker/buildx/blob/fb27e3f919dcbf614d7126b10c2bc2d0b1927eb6/build/build.go#L603
+      args.push('--attest', `type=provenance,${Build.resolveProvenanceAttrs(`mode=min,inline-only=true`)}`);
+    } else {
+      // for a public repository, we set max provenance mode.
+      args.push('--attest', `type=provenance,${Build.resolveProvenanceAttrs(`mode=max`)}`);
+    }
+  }
+  if (inputs.sbom) {
+    args.push('--attest', Build.resolveAttestationAttrs(`type=sbom,${inputs.sbom}`));
+    sbomSet = true;
   }
 
-  return res.filter(item => item).map(pat => pat.trim());
+  // set attests but check if provenance or sbom types already set as
+  // provenance and sbom inputs take precedence over attests input.
+  await Util.asyncForEach(inputs.attests, async (attest: string) => {
+    if (!Build.hasAttestationType('provenance', attest) && !Build.hasAttestationType('sbom', attest)) {
+      args.push('--attest', Build.resolveAttestationAttrs(attest));
+    } else if (!provenanceSet && Build.hasAttestationType('provenance', attest)) {
+      args.push('--attest', Build.resolveProvenanceAttrs(attest));
+    } else if (!sbomSet && Build.hasAttestationType('sbom', attest)) {
+      args.push('--attest', attest);
+    }
+  });
+
+  return args;
 }
 
-export const asyncForEach = async (array, callback) => {
-  for (let index = 0; index < array.length; index++) {
-    await callback(array[index], index, array);
+function noDefaultAttestations(): boolean {
+  if (process.env.BUILDX_NO_DEFAULT_ATTESTATIONS) {
+    return Util.parseBool(process.env.BUILDX_NO_DEFAULT_ATTESTATIONS);
   }
-};
+  return false;
+}

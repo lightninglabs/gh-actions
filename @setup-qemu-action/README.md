@@ -1,15 +1,12 @@
 [![GitHub release](https://img.shields.io/github/release/docker/setup-qemu-action.svg?style=flat-square)](https://github.com/docker/setup-qemu-action/releases/latest)
 [![GitHub marketplace](https://img.shields.io/badge/marketplace-docker--setup--qemu-blue?logo=github&style=flat-square)](https://github.com/marketplace/actions/docker-setup-qemu)
-[![CI workflow](https://img.shields.io/github/workflow/status/docker/setup-qemu-action/ci?label=ci&logo=github&style=flat-square)](https://github.com/docker/setup-qemu-action/actions?workflow=ci)
+[![CI workflow](https://img.shields.io/github/actions/workflow/status/docker/setup-qemu-action/ci.yml?branch=master&label=ci&logo=github&style=flat-square)](https://github.com/docker/setup-qemu-action/actions?workflow=ci)
+[![Test workflow](https://img.shields.io/github/actions/workflow/status/docker/setup-qemu-action/test.yml?branch=master&label=test&logo=github&style=flat-square)](https://github.com/docker/setup-qemu-action/actions?workflow=test)
+[![Codecov](https://img.shields.io/codecov/c/github/docker/setup-qemu-action?logo=codecov&style=flat-square)](https://codecov.io/gh/docker/setup-qemu-action)
 
 ## About
 
-GitHub Action to install [QEMU static binaries](https://github.com/multiarch/qemu-user-static).
-
-> :bulb: See also:
-> * [login](https://github.com/docker/login-action) action
-> * [setup-buildx](https://github.com/docker/setup-buildx-action) action
-> * [build-push](https://github.com/docker/build-push-action) action
+GitHub Action to install [QEMU](https://github.com/qemu/qemu) static binaries.
 
 ![Screenshot](.github/setup-qemu-action.png)
 
@@ -18,8 +15,8 @@ ___
 * [Usage](#usage)
 * [Customizing](#customizing)
   * [inputs](#inputs)
-* [Keep up-to-date with GitHub Dependabot](#keep-up-to-date-with-github-dependabot)
-* [Limitation](#limitation)
+  * [outputs](#outputs)
+* [Contributing](#contributing)
 
 ## Usage
 
@@ -34,55 +31,73 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       -
-        name: Checkout
-        uses: actions/checkout@v2
+        name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+```
+
+This action registers QEMU emulators with `binfmt_misc`, so later steps can run
+containers built for another architecture on the GitHub-hosted runner.
+
+```yaml
+name: run-cross-platform-container
+
+on:
+  workflow_dispatch:
+
+jobs:
+  qemu-example:
+    runs-on: ubuntu-latest
+    steps:
       -
         name: Set up QEMU
-        id: qemu
-        uses: docker/setup-qemu-action@v1
-        with:
-          image: tonistiigi/binfmt:latest
-          platforms: all
+        uses: docker/setup-qemu-action@v4
       -
-        name: Available platforms
-        run: echo ${{ steps.qemu.outputs.platforms }}
+        name: Run an arm64 container
+        run: docker run --rm --platform linux/arm64 alpine uname -m
 ```
+
+The command above prints `aarch64` even though the job itself is running on
+`ubuntu-latest`.
+
+> [!TIP]
+> `setup-qemu-action` enables user-mode emulation for registered platforms. It
+> does not install `qemu-system-*` tools or add `qemu-*` binaries to your PATH.
+
+> [!NOTE]
+> If you are using [`docker/setup-buildx-action`](https://github.com/docker/setup-buildx-action),
+> this action should come before it:
+> 
+> ```yaml
+>     -
+>       name: Set up QEMU
+>       uses: docker/setup-qemu-action@v4
+>     -
+>       name: Set up Docker Buildx
+>       uses: docker/setup-buildx-action@v4
+> ```
 
 ## Customizing
 
 ### inputs
 
-Following inputs can be used as `step.with` keys
+The following inputs can be used as `step.with` keys:
 
-| Name             | Type    | Description                        |
-|------------------|---------|------------------------------------|
-| `image`          | String  | QEMU static binaries Docker image (default [`tonistiigi/binfmt:latest`](https://hub.docker.com/r/tonistiigi/binfmt/tags)) |
-| `platforms`      | String  | Platforms to install (e.g. `arm64,riscv64,arm` ; default `all`) |
+| Name          | Type   | Default                                                                       | Description                                        |
+|---------------|--------|-------------------------------------------------------------------------------|----------------------------------------------------|
+| `image`       | String | [`tonistiigi/binfmt:latest`](https://hub.docker.com/r/tonistiigi/binfmt/tags) | QEMU static binaries Docker image                  |
+| `platforms`   | String | `all`                                                                         | Platforms to install (e.g., `arm64,riscv64,arm`)   |
+| `reset`       | Bool   | `false`                                                                       | Uninstall current emulators before installation    |
+| `cache-image` | Bool   | `true`                                                                        | Cache binfmt image to GitHub Actions cache backend |
 
 ### outputs
 
-Following outputs are available
+The following outputs are available:
 
 | Name          | Type    | Description                           |
 |---------------|---------|---------------------------------------|
 | `platforms`   | String  | Available platforms (comma separated) |
 
-## Keep up-to-date with GitHub Dependabot
+## Contributing
 
-Since [Dependabot](https://docs.github.com/en/github/administering-a-repository/keeping-your-actions-up-to-date-with-github-dependabot)
-has [native GitHub Actions support](https://docs.github.com/en/github/administering-a-repository/configuration-options-for-dependency-updates#package-ecosystem),
-to enable it on your GitHub repo all you need to do is add the `.github/dependabot.yml` file:
-
-```yaml
-version: 2
-updates:
-  # Maintain dependencies for GitHub Actions
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "daily"
-```
-
-## Limitation
-
-This action is only available for Linux [virtual environments](https://docs.github.com/en/actions/reference/virtual-environments-for-github-hosted-runners#supported-virtual-environments-and-hardware-resources).
+Want to contribute? Awesome! You can find information about contributing to
+this project in the [CONTRIBUTING.md](/.github/CONTRIBUTING.md)

@@ -1,74 +1,89 @@
 import * as core from '@actions/core';
-import * as aws from './aws';
-import * as execm from './exec';
 
-export async function login(registry: string, username: string, password: string): Promise<void> {
-  if (await aws.isECR(registry)) {
-    await loginECR(registry, username, password);
+import {Docker} from '@docker/actions-toolkit/lib/docker/docker.js';
+
+import * as aws from './aws.js';
+import * as context from './context.js';
+import * as dockerhub from './dockerhub.js';
+
+export async function login(auth: context.Auth): Promise<void> {
+  if (/true/i.test(auth.ecr) || (auth.ecr == 'auto' && aws.isECR(auth.registry))) {
+    await loginECR(auth.registry, auth.username, auth.password, auth.scope);
   } else {
-    await loginStandard(registry, username, password);
+    let username = auth.username;
+    let password = auth.password;
+    if (dockerhub.isDockerHubOIDC(auth.registry, password)) {
+      const credentials = await dockerhub.getOIDCToken(auth.registry, username);
+      username = credentials.username;
+      password = credentials.token;
+    }
+    await loginStandard(auth.registry, username, password, auth.scope);
   }
 }
 
-export async function logout(registry: string): Promise<void> {
-  await execm.exec('docker', ['logout', registry], false).then(res => {
-    if (res.stderr != '' && !res.success) {
-      core.warning(res.stderr);
+export async function logout(registry: string, configDir: string): Promise<void> {
+  let envs: {[key: string]: string} | undefined;
+  if (configDir !== '') {
+    envs = Object.assign({}, process.env, {
+      DOCKER_CONFIG: configDir
+    }) as {
+      [key: string]: string;
+    };
+    core.info(`Alternative config dir: ${configDir}`);
+  }
+  await Docker.getExecOutput(['logout', registry], {
+    ignoreReturnCode: true,
+    env: envs
+  }).then(res => {
+    if (res.stderr.length > 0 && res.exitCode != 0) {
+      core.warning(res.stderr.trim());
     }
   });
 }
 
-export async function loginStandard(registry: string, username: string, password: string): Promise<void> {
-  if (!username || !password) {
+export async function loginStandard(registry: string, username: string, password: string, scope?: string): Promise<void> {
+  if (!username && !password) {
     throw new Error('Username and password required');
   }
-
-  let loginArgs: Array<string> = ['login', '--password-stdin'];
-  loginArgs.push('--username', username);
-  loginArgs.push(registry);
-
-  if (registry) {
-    core.info(`🔑 Logging into ${registry}...`);
-  } else {
-    core.info(`🔑 Logging into Docker Hub...`);
+  if (!username) {
+    throw new Error('Username required');
   }
-  await execm.exec('docker', loginArgs, true, password).then(res => {
-    if (res.stderr != '' && !res.success) {
-      throw new Error(res.stderr);
-    }
-    core.info('🎉 Login Succeeded!');
-  });
+  if (!password) {
+    throw new Error('Password required');
+  }
+  await loginExec(registry, username, password, scope);
 }
 
-export async function loginECR(registry: string, username: string, password: string): Promise<void> {
-  const cliPath = await aws.getCLI();
-  const cliVersion = await aws.getCLIVersion();
-  const region = await aws.getRegion(registry);
-  const accountIDs = await aws.getAccountIDs(registry);
-
-  if (await aws.isPubECR(registry)) {
-    core.info(`💡 AWS Public ECR detected with ${region} region`);
-  } else {
-    core.info(`💡 AWS ECR detected with ${region} region`);
+export async function loginECR(registry: string, username: string, password: string, scope?: string): Promise<void> {
+  core.info(`Retrieving registries data through AWS SDK...`);
+  const regDatas = await aws.getRegistriesData(registry, username, password);
+  for (const regData of regDatas) {
+    await loginExec(regData.registry, regData.username, regData.password, scope);
   }
+}
 
-  process.env.AWS_ACCESS_KEY_ID = username || process.env.AWS_ACCESS_KEY_ID;
-  process.env.AWS_SECRET_ACCESS_KEY = password || process.env.AWS_SECRET_ACCESS_KEY;
-
-  core.info(`⬇️ Retrieving docker login command through AWS CLI ${cliVersion} (${cliPath})...`);
-  const loginCmds = await aws.getDockerLoginCmds(cliVersion, registry, region, accountIDs);
-
-  core.info(`🔑 Logging into ${registry}...`);
-  loginCmds.forEach((loginCmd, index) => {
-    execm.exec(loginCmd, [], true).then(res => {
-      if (res.stderr != '' && !res.success) {
-        throw new Error(res.stderr);
-      }
-      if (loginCmds.length > 1) {
-        core.info(`🎉 Login Succeeded! (${index}/${loginCmds.length})`);
-      } else {
-        core.info('🎉 Login Succeeded!');
-      }
-    });
+async function loginExec(registry: string, username: string, password: string, scope?: string): Promise<void> {
+  let envs: {[key: string]: string} | undefined;
+  const configDir = context.scopeToConfigDir(registry, scope);
+  if (configDir !== '') {
+    envs = Object.assign({}, process.env, {
+      DOCKER_CONFIG: configDir
+    }) as {
+      [key: string]: string;
+    };
+    core.info(`Logging into ${registry} (scope ${scope})...`);
+  } else {
+    core.info(`Logging into ${registry}...`);
+  }
+  await Docker.getExecOutput(['login', '--password-stdin', '--username', username, registry], {
+    ignoreReturnCode: true,
+    silent: true,
+    input: Buffer.from(password),
+    env: envs
+  }).then(res => {
+    if (res.stderr.length > 0 && res.exitCode != 0) {
+      throw new Error(res.stderr.trim());
+    }
+    core.info('Login Succeeded!');
   });
 }

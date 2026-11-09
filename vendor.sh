@@ -55,7 +55,7 @@ function vendor() {
 }
 
 vendor "softprops" "action-gh-release" "c062e08bd532815e2082a85e87e3ef29c3e6d191" "build"
-vendor "docker" "login-action" "f3364599c6aa293cdc2b8391b1b56d0c30e45c8a" "build"
-vendor "docker" "build-push-action" "4a531fa5a603bab87dfa56578bd82b28508c9547" "build"
-vendor "docker" "setup-buildx-action" "154c24e1f33dbb5865a021c99f1318cfebf27b32" "build"
-vendor "docker" "setup-qemu-action" "6520a2d2cb6db42c90c297c8025839c98e531268" "build"
+vendor "docker" "login-action" "81c6f93d4bc991e510b342a00b419b3bb4efc5c6" "build"         # v4.7.0
+vendor "docker" "build-push-action" "c3c9e263c25d99ce0380d002d59b67737d91b0dc" "build"    # v7.4.0
+vendor "docker" "setup-buildx-action" "f87e5991a6d7451dcb8d9637bfbc97413f497069" "build"  # v4.4.1
+vendor "docker" "setup-qemu-action" "99012661954931238ded8c8b007157a8430204e1" "build"    # v4.4.0

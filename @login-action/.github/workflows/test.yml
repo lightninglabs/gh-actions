@@ -1,40 +1,35 @@
 name: test
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches:
-      - master
-      - releases/v*
-    paths-ignore:
-      - '**.md'
+      - 'master'
+      - 'releases/v*'
   pull_request:
-    paths-ignore:
-      - '**.md'
 
 jobs:
   test:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-20.04
-          - ubuntu-18.04
-          - ubuntu-16.04
+    runs-on: ubuntu-latest
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v2
-      -
-        name: Install
-        run: yarn install
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       -
         name: Test
-        run: yarn run test
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          targets: test
       -
         name: Upload coverage
-        uses: codecov/codecov-action@v1
-        if: success()
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
+          files: ./coverage/clover.xml
           token: ${{ secrets.CODECOV_TOKEN }}
-          file: ./coverage/clover.xml
